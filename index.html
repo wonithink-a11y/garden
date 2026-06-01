@@ -15,8 +15,8 @@
 <meta name="description" content="AI 기반 스마트 정원 관리 앱 — 식물 식별, 병해충 진단, 비료·농약 관리"/>
 
 <!-- 웹 앱 매니페스트 -->
-<link rel="manifest" href="/manifest.json"/>
-<link rel="apple-touch-icon" href="/icon-192.png"/>
+<link rel="manifest" href="manifest.json"/>
+<link rel="apple-touch-icon" href="icon-192.png"/>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -3449,7 +3449,7 @@ ReactDOM.render(<App/>, document.getElementById("root"));
 <script>
 // ── 서비스워커 등록 (오프라인 캐시) ──
 if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+  navigator.serviceWorker.register('./sw.js').catch(()=>{});
 }
 
 // ── 홈 화면 추가 배너 ──
