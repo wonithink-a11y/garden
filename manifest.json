@@ -2,12 +2,13 @@
   "name": "나의 정원 도감",
   "short_name": "정원도감",
   "description": "Gemini AI 기반 스마트 정원 관리 앱",
-  "start_url": "/",
+  "start_url": "/garden/",
+  "scope": "/garden/",
   "display": "standalone",
   "background_color": "#F5F0E8",
   "theme_color": "#4A7C59",
   "icons": [
-    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
-    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
   ]
 }
