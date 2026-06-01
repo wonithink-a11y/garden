@@ -166,64 +166,33 @@ function repairJson(str) {
 }
 
 async function callGemini(parts, apiKey) {
-  const MODELS = [
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash",
-  ];
-  // AQ. 형식 키는 Authorization 헤더 방식, AIza 형식은 URL 파라미터 방식
-  const isNewFormat = apiKey.startsWith("AQ.");
+  const MODELS = ["gemini-2.5-flash","gemini-2.0-flash"];
   let lastError = null;
   for (const model of MODELS) {
-    // AQ. 형식 키는 x-goog-api-key 헤더, AIza 형식은 URL 파라미터
-    const isNewFormat = apiKey.startsWith("AQ.");
-    const url = isNewFormat
-      ? `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`
-      : `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-    const headers = {"Content-Type":"application/json"};
-    if(isNewFormat) headers["x-goog-api-key"] = apiKey;
-    else headers["x-goog-api-key"] = apiKey; // 두 형식 모두 헤더 방식 사용
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    const headers = {"Content-Type":"application/json","x-goog-api-key":apiKey};
     let res;
     try {
-      res = await fetch(url, {
-        method:"POST",
-        headers,
-        body:JSON.stringify({
-          contents:[{parts}],
-          generationConfig:{temperature:0.1,maxOutputTokens:4096}
-        })
-      });
-    } catch(e) {
-      throw new Error("네트워크 오류: 인터넷 연결을 확인해주세요.");
+      res = await fetch(url,{method:"POST",headers,body:JSON.stringify({contents:[{parts}],generationConfig:{temperature:0.1,maxOutputTokens:4096}})});
+    } catch(e) { throw new Error("네트워크 오류: 인터넷 연결을 확인해주세요."); }
+    if(res.status===401) throw new Error("❌ API 키가 올바르지 않습니다.\naistudio.google.com/apikey 에서 키를 다시 복사해주세요.");
+    if(res.status===403) throw new Error("❌ API 키 권한 오류(403)\n개인 Gmail로 새 키를 발급해보세요.");
+    if(res.status===404){const e=await res.json().catch(()=>({}));lastError=e?.error?.message||`모델 ${model} 없음`;continue;}
+    if(res.status===429){
+      const e=await res.json().catch(()=>({}));
+      const m=e?.error?.message||"";
+      const w=Math.ceil(parseFloat((m.match(/retry in ([\d.]+)s/i)||[])[1]||60));
+      if(w<=120) throw new Error(`⏳ 분당 요청 한도 초과\n${w}초 후 다시 시도해주세요.`);
+      throw new Error(`📅 일일 사용량 소진\n확인: aistudio.google.com/usage\n리셋: 매일 오전 9시`);
     }
-    if(res.status === 401) {
-      throw new Error("❌ API 키가 올바르지 않습니다.\n\naistudio.google.com/apikey 에서 키를 다시 복사해 붙여넣어 주세요.");
-    }
-    if(res.status === 403) {
-      throw new Error("❌ API 키 권한 오류 (403)\n\n회사·학교 계정은 제한될 수 있습니다.\n개인 Gmail로 새 키를 발급해보세요.");
-    }
-    if(res.status === 404) {
-      const err = await res.json().catch(()=>({}));
-      lastError = err?.error?.message || `모델 ${model} 없음`;
-      continue;
-    }
-    if(res.status === 429) {
-      const err = await res.json().catch(()=>({}));
-      const msg = err?.error?.message || "";
-      const retryMatch = msg.match(/retry in ([\d.]+)s/i);
-      const wait = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) : 60;
-      throw new Error(`⏳ API 요청 한도 초과\n\n${wait}초 후 다시 시도해주세요.\n(무료 한도는 AI Studio 대시보드에서 확인)\n\n💡 새 Gmail 계정으로 키를 발급하면 한도가 초기화됩니다.`);
-    }
-    if(!res.ok) {
-      const err = await res.json().catch(()=>({}));
-      throw new Error(err?.error?.message || `API 오류 (${res.status})`);
-    }
-    const data = await res.json();
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    const clean = text.replace(/```json|```/g,"").trim();
-    try { return JSON.parse(clean); } catch(_) {}
+    if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e?.error?.message||`API 오류(${res.status})`);}
+    const data=await res.json();
+    const text=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+    const clean=text.replace(/```json|```/g,"").trim();
+    try{return JSON.parse(clean);}catch(_){}
     return repairJson(clean);
   }
-  throw new Error(`모든 모델 접속 실패.\n마지막 오류: ${lastError}\n\nAPI 키를 다시 확인해주세요.`);
+  throw new Error(`모든 모델 접속 실패. 마지막 오류: ${lastError}`);
 }
 
 function fileToBase64(file){
@@ -351,31 +320,22 @@ function saveStorage(key, value) {
 /* ── Firebase 동기화 유틸 ── */
 let _fbApp = null;
 let _fbDb = null;
-
-function getFirebaseConfig() { return loadStorage("firebase_config_v1", null); }
-function saveFirebaseConfig(cfg) { saveStorage("firebase_config_v1", cfg); }
-
-function initFirebase(config) {
-  try {
-    // 기존 앱 삭제
-    try { firebase.apps.forEach(a=>a.delete()); } catch(e) {}
-    _fbApp = firebase.initializeApp(config);
-    _fbDb = firebase.database(_fbApp);
+function getFirebaseConfig(){return loadStorage("firebase_config_v1",null);}
+function initFirebase(config){
+  try{
+    if(window._fbAppInstance){try{window._fbAppInstance.delete();}catch(e){}}
+    window._fbAppInstance=firebase.initializeApp(config,"garden-"+Date.now());
+    _fbDb=firebase.database(window._fbAppInstance);
     return true;
-  } catch(e) {
-    console.error("Firebase 초기화 오류:", e);
-    return false;
-  }
+  }catch(e){console.error("Firebase 오류:",e);return false;}
 }
-
-function getFamilyRef(familyCode) {
-  if (!_fbDb || !familyCode) return null;
-  return _fbDb.ref("garden-families/" + familyCode.toUpperCase().trim());
+function getFamilyRef(code){
+  if(!_fbDb||!code)return null;
+  return _fbDb.ref("garden-families/"+code.toUpperCase().trim());
 }
-
-function getDeviceId() {
-  let id = localStorage.getItem("device_id");
-  if (!id) { id = Math.random().toString(36).slice(2,10); localStorage.setItem("device_id", id); }
+function getDeviceId(){
+  let id=localStorage.getItem("device_id");
+  if(!id){id=Math.random().toString(36).slice(2,10);localStorage.setItem("device_id",id);}
   return id;
 }
 
@@ -458,7 +418,7 @@ const OWM_CODES={
 };
 
 /* ── 기본 데이터 ── */
-const WEATHER_CODES={0:{label:"맑음",icon:"☀️"},1:{label:"대체로 맑음",icon:"🌤️"},2:{label:"부분 흐림",icon:"⛅"},3:{label:"흐림",icon:"☁️"},45:{label:"안개",icon:"🌫️"},51:{label:"이슬비",icon:"🌦️"},61:{label:"비",icon:"🌧️"},65:{label:"강한 비",icon:"🌧️"},71:{label:"눈",icon:"❄️"},80:{label:"소나기",icon:"🌦️"},95:{label:"뇌우",icon:"⛈️"}};
+const WEATHER_CODES={0:{label:"맑음",icon:"☀️"},1:{label:"대체로 맑음",icon:"🌤️"},2:{label:"부분 흐림",icon:"⛅"},3:{label:"흐림",icon:"☁️"},45:{label:"안개",icon:"🌫️"},48:{label:"안개",icon:"🌫️"},51:{label:"이슬비",icon:"🌦️"},53:{label:"이슬비",icon:"🌦️"},55:{label:"이슬비",icon:"🌦️"},61:{label:"비",icon:"🌧️"},63:{label:"비",icon:"🌧️"},65:{label:"강한 비",icon:"🌧️"},71:{label:"눈",icon:"❄️"},73:{label:"눈",icon:"❄️"},75:{label:"강한 눈",icon:"❄️"},77:{label:"싸락눈",icon:"❄️"},80:{label:"소나기",icon:"🌦️"},81:{label:"소나기",icon:"🌦️"},82:{label:"강한 소나기",icon:"🌦️"},95:{label:"뇌우",icon:"⛈️"},96:{label:"뇌우+우박",icon:"⛈️"},99:{label:"강한 뇌우",icon:"⛈️"}};
 
 const MONTHLY_TASKS={
   1:{tip:"나주 1월 영하권. 노지 보온재 점검.",early:{sow:["파프리카(실내)","페튜니아(실내)"],plant:[],harvest:[],care:["월동 보온 점검"]},mid:{sow:["팬지(실내)"],plant:[],harvest:[],care:["씨앗·구근 구매 계획"]},late:{sow:[],plant:[],harvest:[],care:["정원 설계 스케치","도구 정비"]}},
@@ -534,102 +494,64 @@ const ConfirmDlg=({open,title,message,onConfirm,onCancel})=>{
 };
 
 
-/* ── 가족 동기화 설정 패널 ── */
-const FamilySyncPanel = ({onClose}) => {
-  const[cfgText, setCfgText] = useState(() => {
-    const c = getFirebaseConfig();
-    return c ? JSON.stringify(c, null, 2) : '';
-  });
-  const[code, setCode] = useState(() => localStorage.getItem('family_code') || '');
-  const[status, setStatus] = useState('');
-  const[testing, setTesting] = useState(false);
-
-  const genCode = () => {
-    const c = Math.random().toString(36).slice(2,8).toUpperCase();
-    setCode(c);
+/* ── 가족 동기화 패널 ── */
+const FamilySyncPanel=({onClose})=>{
+  const[cfg,setCfg]=useState(()=>{const c=getFirebaseConfig();return c?JSON.stringify(c,null,2):"";});
+  const[code,setCode]=useState(()=>localStorage.getItem("family_code")||"");
+  const[status,setStatus]=useState("");
+  const[busy,setBusy]=useState(false);
+  const genCode=()=>setCode(Math.random().toString(36).slice(2,8).toUpperCase());
+  const doSave=async()=>{
+    if(!cfg.trim()){setStatus("❌ Firebase 설정을 입력해주세요");return;}
+    if(!code.trim()){setStatus("❌ 가족 코드를 입력해주세요");return;}
+    let parsed;
+    try{parsed=JSON.parse(cfg);}catch(e){setStatus("❌ JSON 형식 오류: "+e.message);return;}
+    setBusy(true);setStatus("🔄 연결 확인 중...");
+    try{
+      const ok=initFirebase(parsed);
+      if(!ok)throw new Error("초기화 실패");
+      const ref=getFamilyRef(code);
+      if(!ref)throw new Error("DB 참조 실패");
+      await ref.child("_test").set({t:Date.now()});
+      await ref.child("_test").remove();
+      saveStorage("firebase_config_v1",parsed);
+      localStorage.setItem("family_code",code.toUpperCase().trim());
+      setStatus("✅ 연결 성공!");
+      setTimeout(()=>onClose(true),1000);
+    }catch(e){setStatus("❌ 연결 실패: "+e.message);}
+    finally{setBusy(false);}
   };
-
-  const handleSave = async () => {
-    if (!cfgText.trim()) { setStatus('❌ Firebase 설정을 입력해주세요'); return; }
-    if (!code.trim()) { setStatus('❌ 가족 코드를 입력해주세요'); return; }
-    let cfg;
-    try { cfg = JSON.parse(cfgText); } catch(e) { setStatus('❌ JSON 형식 오류: ' + e.message); return; }
-    setTesting(true); setStatus('🔄 연결 테스트 중...');
-    try {
-      const ok = initFirebase(cfg);
-      if (!ok) throw new Error('초기화 실패');
-      const ref = getFamilyRef(code);
-      if (!ref) throw new Error('DB 참조 실패');
-      await ref.child('test').set({t: Date.now()});
-      await ref.child('test').remove();
-      saveFirebaseConfig(cfg);
-      localStorage.setItem('family_code', code.toUpperCase().trim());
-      setStatus('✅ 연결 성공! 동기화가 활성화되었습니다.');
-      setTimeout(() => onClose(true), 1200);
-    } catch(e) {
-      setStatus('❌ 연결 실패: ' + e.message);
-    } finally { setTesting(false); }
+  const doDisable=()=>{
+    localStorage.removeItem("family_code");
+    localStorage.removeItem("firebase_config_v1");
+    onClose(false);
   };
-
-  const handleDisable = () => {
-    localStorage.removeItem('family_code');
-    localStorage.removeItem('firebase_config_v1');
-    setStatus('동기화가 비활성화되었습니다.');
-    setTimeout(() => onClose(false), 800);
-  };
-
-  return (
-    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.55)',zIndex:9999,display:'flex',alignItems:'flex-end'}} onClick={e=>{if(e.target===e.currentTarget)onClose(false);}}>
-      <div style={{background:'#fff',width:'100%',maxHeight:'90vh',borderRadius:'16px 16px 0 0',padding:'20px 16px',overflowY:'auto'}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-          <div style={{fontSize:17,fontWeight:800,color:'#4D7A52'}}>🔄 가족 동기화 설정</div>
-          <button onClick={()=>onClose(false)} style={{background:'none',border:'none',fontSize:20,cursor:'pointer',color:'#888'}}>✕</button>
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:9999,display:"flex",alignItems:"flex-end"}} onClick={e=>{if(e.target===e.currentTarget)onClose(false);}}>
+      <div style={{background:"#fff",width:"100%",maxHeight:"88vh",borderRadius:"16px 16px 0 0",padding:"20px 16px",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+          <div style={{fontSize:16,fontWeight:800,color:"#4D7A52"}}>🔄 가족 동기화 설정</div>
+          <button onClick={()=>onClose(false)} style={{background:"none",border:"none",fontSize:22,cursor:"pointer",color:"#999"}}>✕</button>
         </div>
-
-        {/* Step 1: Firebase 설정 */}
-        <div style={{background:'#F0F7F0',borderRadius:10,padding:12,marginBottom:12}}>
-          <div style={{fontSize:13,fontWeight:700,color:'#4D7A52',marginBottom:6}}>① Firebase 설정 (JSON)</div>
-          <div style={{fontSize:11,color:'#888',marginBottom:8,lineHeight:1.5}}>
-            console.firebase.google.com → 프로젝트 설정 → 웹앱 → <b>firebaseConfig</b> 복사
+        <div style={{background:"#F0F7F0",borderRadius:10,padding:12,marginBottom:10}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#4D7A52",marginBottom:6}}>① Firebase 설정 JSON</div>
+          <div style={{fontSize:11,color:"#888",marginBottom:6}}>console.firebase.google.com → 프로젝트 설정 → 웹앱 → 구성 탭 복사</div>
+          <textarea value={cfg} onChange={e=>setCfg(e.target.value)} placeholder={'{\n  "apiKey": "...",\n  "databaseURL": "https://..."\n}'} style={{width:"100%",height:120,fontSize:11,fontFamily:"monospace",padding:8,borderRadius:8,border:"1px solid #ccc",resize:"none"}}/>
+        </div>
+        <div style={{background:"#FFF8F0",borderRadius:10,padding:12,marginBottom:10}}>
+          <div style={{fontSize:13,fontWeight:700,color:"#E07B39",marginBottom:6}}>② 가족 코드</div>
+          <div style={{fontSize:11,color:"#888",marginBottom:6}}>같은 코드 입력한 가족끼리 데이터 공유</div>
+          <div style={{display:"flex",gap:8}}>
+            <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())} placeholder="예: ABC123" style={{flex:1,padding:"10px 12px",borderRadius:8,border:"1px solid #ccc",fontSize:15,fontWeight:700,letterSpacing:2,textAlign:"center"}}/>
+            <button onClick={genCode} style={{background:"#E07B39",color:"#fff",border:"none",borderRadius:8,padding:"10px 14px",fontSize:12,fontWeight:700,cursor:"pointer"}}>코드생성</button>
           </div>
-          <textarea
-            value={cfgText}
-            onChange={e=>setCfgText(e.target.value)}
-            placeholder={'{
-  "apiKey": "AIza...",
-  "databaseURL": "https://...",
-  ...
-}'}
-            style={{width:'100%',height:130,fontSize:11,fontFamily:'monospace',padding:8,borderRadius:8,border:'1px solid #ccc',resize:'none'}}
-          />
         </div>
-
-        {/* Step 2: 가족 코드 */}
-        <div style={{background:'#FFF8F0',borderRadius:10,padding:12,marginBottom:12}}>
-          <div style={{fontSize:13,fontWeight:700,color:'#E07B39',marginBottom:6}}>② 가족 코드</div>
-          <div style={{fontSize:11,color:'#888',marginBottom:8}}>같은 코드를 입력한 가족끼리 데이터가 공유됩니다.</div>
-          <div style={{display:'flex',gap:8}}>
-            <input value={code} onChange={e=>setCode(e.target.value.toUpperCase())}
-              placeholder='예: ABCD12'
-              style={{flex:1,padding:'10px 12px',borderRadius:8,border:'1px solid #ccc',fontSize:14,fontWeight:700,letterSpacing:2,textAlign:'center'}}
-            />
-            <button onClick={genCode} style={{background:'#E07B39',color:'#fff',border:'none',borderRadius:8,padding:'10px 14px',fontSize:12,fontWeight:700,cursor:'pointer',whiteSpace:'nowrap'}}>
-              코드 생성
-            </button>
-          </div>
-          <div style={{fontSize:10,color:'#aaa',marginTop:6}}>⚠️ 가족에게 이 코드를 공유하세요. 코드를 아는 사람 모두 접근 가능합니다.</div>
-        </div>
-
-        {status && <div style={{padding:'10px 12px',borderRadius:8,background:status.startsWith('✅')?'#F0FFF4':status.startsWith('❌')?'#FFF0F0':'#F0F4FF',fontSize:12,color:'#444',marginBottom:12}}>{status}</div>}
-
-        <button onClick={handleSave} disabled={testing}
-          style={{width:'100%',padding:'13px',borderRadius:10,border:'none',background:'#4D7A52',color:'#fff',fontSize:15,fontWeight:800,cursor:'pointer',marginBottom:8,opacity:testing?0.6:1}}>
-          {testing ? '연결 확인 중...' : '💾 저장 및 동기화 시작'}
+        {status&&<div style={{padding:"10px 12px",borderRadius:8,background:status.startsWith("✅")?"#F0FFF4":status.startsWith("❌")?"#FFF0F0":"#F0F4FF",fontSize:12,marginBottom:10}}>{status}</div>}
+        <button onClick={doSave} disabled={busy} style={{width:"100%",padding:13,borderRadius:10,border:"none",background:"#4D7A52",color:"#fff",fontSize:15,fontWeight:800,cursor:"pointer",marginBottom:8,opacity:busy?0.6:1}}>
+          {busy?"확인 중...":"💾 저장 및 동기화 시작"}
         </button>
-        {(getFirebaseConfig()||localStorage.getItem('family_code')) && (
-          <button onClick={handleDisable} style={{width:'100%',padding:'10px',borderRadius:10,border:'1px solid #ddd',background:'#fff',color:'#999',fontSize:13,cursor:'pointer'}}>
-            동기화 끄기
-          </button>
+        {(getFirebaseConfig()||localStorage.getItem("family_code"))&&(
+          <button onClick={doDisable} style={{width:"100%",padding:10,borderRadius:10,border:"1px solid #ddd",background:"#fff",color:"#999",fontSize:13,cursor:"pointer"}}>동기화 끄기</button>
         )}
       </div>
     </div>
@@ -1418,7 +1340,7 @@ const GardenTab=({garden,weather,daily,wLoading,wError,onRefresh,overdueCount,on
               <div style={{borderTop:`1px solid ${C.sky}25`,background:"rgba(255,255,255,0.5)"}}>
                 <div style={{fontSize:11,color:C.inkLight,fontWeight:700,padding:"6px 14px 4px"}}>오늘 시간별 예보 (3시간 단위)</div>
                 <div style={{display:"flex",overflowX:"auto",padding:"4px 10px 10px",gap:6,WebkitOverflowScrolling:"touch"}}>
-                  {weather.hourly.map(slot=>{
+                  {(()=>{const ci=weather.hourly.findIndex(s=>s.isCurrent);return ci>0?weather.hourly.slice(ci-1):weather.hourly;})().map(slot=>{
                     const sc=slot.kmaIcon?{icon:slot.kmaIcon}:slot.owmCode?(OWM_CODES[slot.owmCode]||{icon:"🌡️"}):(WEATHER_CODES[slot.weathercode]||{icon:"🌡️"});
                     return(
                       <div key={slot.hour} style={{flexShrink:0,width:46,borderRadius:8,padding:"5px 3px",textAlign:"center",background:slot.isCurrent?"rgba(74,144,196,0.2)":"rgba(255,255,255,0.65)",border:"1px solid "+(slot.isCurrent?C.sky+"70":"transparent"),opacity:slot.isPast?0.35:1}}>
@@ -3088,16 +3010,16 @@ const SuppliesTab=({pesticides,fertilizers,onAddPest,onAddFert,onUpdatePest,onUp
 /* ── 메인 앱 ── */
 function App(){
   const[apiKey,setApiKey]=useState(()=>localStorage.getItem("gemini_api_key")||"");
-  const[familyCode,setFamilyCode]=useState(()=>localStorage.getItem('family_code')||'');
-  const[syncStatus,setSyncStatus]=useState('off'); // 'off'|'syncing'|'synced'|'error'
+  const[familyCode,setFamilyCode]=useState(()=>localStorage.getItem("family_code")||"");
+  const[syncStatus,setSyncStatus]=useState("off");
   const[showSyncPanel,setShowSyncPanel]=useState(false);
   const isRemoteUpdate=useRef(false);
   const syncTimer=useRef(null);
   const[tab,setTab]=useState("garden");
   const[garden,setGarden]=useState(()=>loadStorage("garden_v1", DEFAULT_GARDEN));
   const[diary,setDiary]=useState(()=>loadStorage("diary_v1", []));
-  const[fertilizers,setFertilizers]=useState(()=>loadStorage('fertilizers_v1', DEFAULT_FERTILIZERS));
-  const[pesticides,setPesticides]=useState(()=>loadStorage('pesticides_v1', DEFAULT_PESTICIDES));
+  const[fertilizers,setFertilizers]=useState(()=>loadStorage("fertilizers_v1",DEFAULT_FERTILIZERS));
+  const[pesticides,setPesticides]=useState(()=>loadStorage("pesticides_v1",DEFAULT_PESTICIDES));
   const[weather,setWeather]=useState(null);
   const[daily,setDaily]=useState([]);
   const[wLoading,setWLoading]=useState(false);
@@ -3114,54 +3036,51 @@ function App(){
   const askDelDiary=(id,msg,title)=>askDel(id,msg,title,i=>setDiary(prev=>prev.filter(d=>d.id!==i)));
 
   useEffect(()=>{fetchWeather();},[]);
-  useEffect(()=>{saveStorage("garden_v1", garden);},[garden]);
-  useEffect(()=>{saveStorage("diary_v1", diary);},[diary]);
-  useEffect(()=>{saveStorage("fertilizers_v1", fertilizers);},[fertilizers]);
-  useEffect(()=>{saveStorage("pesticides_v1", pesticides);},[pesticides]);
+  useEffect(()=>{saveStorage("garden_v1",garden);},[garden]);
+  useEffect(()=>{saveStorage("diary_v1",diary);},[diary]);
+  useEffect(()=>{saveStorage("fertilizers_v1",fertilizers);},[fertilizers]);
+  useEffect(()=>{saveStorage("pesticides_v1",pesticides);},[pesticides]);
 
-  // ── Firebase 동기화 초기화 ──
   useEffect(()=>{
-    const cfg = getFirebaseConfig();
-    const code = localStorage.getItem("family_code");
-    if(!cfg || !code) { setSyncStatus("off"); return; }
-    const ok = initFirebase(cfg);
-    if(!ok) { setSyncStatus("error"); return; }
+    const cfg=getFirebaseConfig();
+    const code=localStorage.getItem("family_code");
+    if(!cfg||!code){setSyncStatus("off");return;}
+    const ok=initFirebase(cfg);
+    if(!ok){setSyncStatus("error");return;}
+    const ref=getFamilyRef(code);
+    if(!ref){setSyncStatus("error");return;}
     setSyncStatus("syncing");
-    const ref = getFamilyRef(code);
-    if(!ref) return;
-    const unsub = ref.on("value", snapshot=>{
-      const data = snapshot.val();
-      if(!data) { setSyncStatus("synced"); return; }
-      // 내가 보낸 업데이트면 무시
-      if(data.deviceId === getDeviceId()) { setSyncStatus("synced"); return; }
-      isRemoteUpdate.current = true;
-      if(data.garden) setGarden(data.garden);
-      if(data.diary) setDiary(data.diary);
-      if(data.fertilizers) setFertilizers(data.fertilizers);
-      if(data.pesticides) setPesticides(data.pesticides);
-      setTimeout(()=>{ isRemoteUpdate.current = false; }, 500);
+    const handler=ref.on("value",snap=>{
+      const data=snap.val();
+      if(!data){setSyncStatus("synced");return;}
+      if(data.deviceId===getDeviceId()){setSyncStatus("synced");return;}
+      isRemoteUpdate.current=true;
+      if(data.garden)setGarden(data.garden);
+      if(data.diary)setDiary(data.diary);
+      if(data.fertilizers)setFertilizers(data.fertilizers);
+      if(data.pesticides)setPesticides(data.pesticides);
+      setTimeout(()=>{isRemoteUpdate.current=false;},500);
       setSyncStatus("synced");
-    }, err=>{ console.error("Firebase 수신 오류:", err); setSyncStatus("error"); });
-    return ()=>{ if(ref) ref.off("value", unsub); };
+    },()=>setSyncStatus("error"));
+    return()=>{ref.off("value",handler);};
   },[familyCode]);
 
-  // ── 데이터 변경시 Firebase로 전송 (디바운스 2초) ──
   useEffect(()=>{
-    if(isRemoteUpdate.current) return;
-    const cfg = getFirebaseConfig();
-    const code = localStorage.getItem("family_code");
-    if(!cfg || !code) return;
-    if(syncTimer.current) clearTimeout(syncTimer.current);
+    if(isRemoteUpdate.current)return;
+    const cfg=getFirebaseConfig();
+    const code=localStorage.getItem("family_code");
+    if(!cfg||!code)return;
+    if(syncTimer.current)clearTimeout(syncTimer.current);
     setSyncStatus("syncing");
-    syncTimer.current = setTimeout(async()=>{
-      try {
-        const ref = getFamilyRef(code);
-        if(!ref) return;
-        await ref.set({ garden, diary, fertilizers, pesticides, deviceId: getDeviceId(), updatedAt: Date.now() });
+    syncTimer.current=setTimeout(async()=>{
+      try{
+        const ref=getFamilyRef(code);
+        if(!ref)return;
+        await ref.set({garden,diary,fertilizers,pesticides,deviceId:getDeviceId(),updatedAt:Date.now()});
         setSyncStatus("synced");
-      } catch(e) { console.error("Firebase 전송 오류:", e); setSyncStatus("error"); }
-    }, 2000);
-  },[garden, diary, fertilizers, pesticides]);
+      }catch(e){setSyncStatus("error");}
+    },2000);
+  },[garden,diary,fertilizers,pesticides]);
 
   const fetchWeather=async()=>{
     setWLoading(true);setWError(false);
@@ -3410,15 +3329,14 @@ function App(){
   return(
     <div style={{minHeight:"100vh",background:`linear-gradient(160deg,${C.cream} 0%,#EFF5EB 100%)`,fontFamily:"'Apple SD Gothic Neo','Noto Sans KR',sans-serif"}}>
       <ConfirmDlg open={confirm.open} title={confirm.title} message={confirm.message} onConfirm={confirm.onConfirm} onCancel={closeConfirm}/>
-      {showSyncPanel && <FamilySyncPanel onClose={(saved)=>{setShowSyncPanel(false);if(saved)setFamilyCode(localStorage.getItem("family_code")||"");}}/>}
+      {showSyncPanel&&<FamilySyncPanel onClose={saved=>{setShowSyncPanel(false);if(saved)setFamilyCode(localStorage.getItem("family_code")||"");}}/>}
       <div style={{background:`linear-gradient(135deg,${C.moss} 0%,${C.sageDark} 100%)`,padding:"14px 20px 10px",textAlign:"center",boxShadow:"0 4px 20px rgba(0,0,0,0.15)"}}>
         <div style={{fontSize:22,marginBottom:2}}>🌿</div>
         <div style={{fontSize:19,fontWeight:900,color:"#fff",letterSpacing:-0.5}}>나의 정원 도감</div>
         <div style={{fontSize:10,color:C.sageLight,marginTop:2,opacity:0.9}}>Powered by Gemini · 식물·정원·달력·일지·비료·농약</div>
-        <div style={{position:"absolute",right:10,top:12,display:"flex",gap:5,alignItems:"center"}}>
-          <button onClick={()=>setShowSyncPanel(true)} style={{background:syncStatus==="synced"?"rgba(100,220,130,0.3)":syncStatus==="error"?"rgba(255,100,100,0.3)":syncStatus==="syncing"?"rgba(255,220,100,0.3)":"rgba(255,255,255,0.15)",border:"none",color:"#fff",borderRadius:6,padding:"3px 8px",fontSize:10,cursor:"pointer",display:"flex",alignItems:"center",gap:3}}>
+        <div style={{position:"absolute",right:8,top:12,display:"flex",gap:4}}>
+          <button onClick={()=>setShowSyncPanel(true)} style={{background:syncStatus==="synced"?"rgba(80,200,100,0.3)":syncStatus==="error"?"rgba(255,80,80,0.3)":"rgba(255,255,255,0.15)",border:"none",color:"#fff",borderRadius:6,padding:"3px 7px",fontSize:10,cursor:"pointer"}}>
             {syncStatus==="synced"?"🔄✅":syncStatus==="error"?"🔄❌":syncStatus==="syncing"?"🔄..":"🔄"}
-            <span>{syncStatus==="off"?"동기화":syncStatus==="synced"?"동기화됨":syncStatus==="syncing"?"동기화 중":"오류"}</span>
           </button>
           <button onClick={()=>{if(confirm("API 키를 초기화하고 로그아웃하시겠습니까?")){localStorage.removeItem("gemini_api_key");setApiKey("");}}} style={{background:"rgba(255,255,255,0.2)",border:"none",color:"#fff",borderRadius:6,padding:"3px 8px",fontSize:10,cursor:"pointer"}}>키 변경</button>
         </div>
