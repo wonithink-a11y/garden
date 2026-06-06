@@ -53,22 +53,37 @@ const C={
 };
 
 /* ── Gemini API ── */
-/* ── Wikipedia 식물 사진 검색 (API 키 불필요) ── */
+/* ── 식물 실사 사진 검색 (iNaturalist 우선 → Wikipedia 폴백) ── */
 async function fetchPlantImage(koreanName, scientificName) {
-  // Wikipedia pageimages API - 가장 안정적
+  const sci = scientificName ? scientificName.split(' ').slice(0,2).join(' ') : null;
+
+  // 1순위: iNaturalist (실제 자연 사진, 실사)
+  async function iNat(q) {
+    try {
+      const url = `https://api.inaturalist.org/v1/taxa?q=${encodeURIComponent(q)}&per_page=3&photos=true&rank=species`;
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      const data = await res.json();
+      for (const r of (data.results||[])) {
+        const photo = r.default_photo?.medium_url;
+        if (photo && !photo.includes('no_photo')) return { url: photo, src: 'iNaturalist' };
+      }
+      return null;
+    } catch { return null; }
+  }
+
+  // 2순위: Wikipedia (삽화 포함되지만 폴백용)
   async function wikiImg(lang, title) {
     try {
       const url = `https://${lang}.wikipedia.org/w/api.php?action=query&titles=${encodeURIComponent(title)}&prop=pageimages&format=json&pithumbsize=600&origin=*`;
       const res = await fetch(url);
       if (!res.ok) return null;
       const data = await res.json();
-      const pages = data.query?.pages;
-      if (!pages) return null;
-      const page = Object.values(pages)[0];
-      return page?.thumbnail?.source || null;
+      const page = Object.values(data.query?.pages||{})[0];
+      const photo = page?.thumbnail?.source;
+      return photo ? { url: photo, src: 'Wikipedia' } : null;
     } catch { return null; }
   }
-  // Wikipedia 검색 API - 제목이 정확하지 않을 때
   async function wikiSearch(lang, q) {
     try {
       const url = `https://${lang}.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&srlimit=1&format=json&origin=*`;
@@ -76,25 +91,22 @@ async function fetchPlantImage(koreanName, scientificName) {
       if (!res.ok) return null;
       const data = await res.json();
       const title = data.query?.search?.[0]?.title;
-      if (!title) return null;
-      return wikiImg(lang, title);
+      return title ? wikiImg(lang, title) : null;
     } catch { return null; }
   }
 
-  const sci = scientificName ? scientificName.split(' ').slice(0,2).join(' ') : null;
-
-  // 순서대로 시도
   const attempts = [
-    sci ? ()=>wikiImg('en', sci) : null,
-    ()=>wikiSearch('en', sci||koreanName),
-    ()=>wikiImg('ko', koreanName),
-    ()=>wikiSearch('ko', koreanName),
-    ()=>wikiSearch('en', koreanName),
+    sci  ? ()=>iNat(sci)            : null,
+             ()=>iNat(koreanName),
+    sci  ? ()=>wikiImg('en', sci)   : null,
+             ()=>wikiSearch('en', sci||koreanName),
+             ()=>wikiImg('ko', koreanName),
+             ()=>wikiSearch('ko', koreanName),
   ].filter(Boolean);
 
-  for (const attempt of attempts) {
-    const img = await attempt();
-    if (img) return img;
+  for (const fn of attempts) {
+    const result = await fn();
+    if (result) return result;
   }
   return null;
 }
@@ -609,7 +621,7 @@ const ApiKeySetup=({onSave})=>{
           style={{width:"100%",padding:13,background:testing?C.inkLight:`linear-gradient(135deg,${C.moss},${C.sageDark})`,color:"#fff",border:"none",borderRadius:12,fontWeight:700,fontSize:15,cursor:testing?"wait":"pointer"}}>
           {testing?"🔍 확인 중...":"🌿 시작하기"}
         </button>
-        <div style={{textAlign:"right",marginTop:10,fontSize:11,color:C.inkLight}}>v55</div>
+        <div style={{textAlign:"right",marginTop:10,fontSize:11,color:C.inkLight}}>v56</div>
       </div>
     </div>
   );
@@ -636,11 +648,11 @@ const PlantCard=({data,onSave,saved,confidence,plantImg})=>(
   <div style={{background:"#fff",borderRadius:16,border:`1px solid ${C.sageLight}`,overflow:"hidden",boxShadow:"0 4px 20px rgba(0,0,0,0.06)"}}>
     {plantImg&&(
       <div style={{position:"relative",height:200,overflow:"hidden",background:C.cream}}>
-        <img src={plantImg} alt={data.koreanName}
+        <img src={plantImg.url} alt={data.koreanName}
           style={{width:"100%",height:"100%",objectFit:"cover",display:"block"}}
           onError={e=>{e.target.parentElement.style.display="none";}}/>
         <div style={{position:"absolute",bottom:0,left:0,right:0,height:60,background:"linear-gradient(transparent,rgba(0,0,0,0.4))"}}/>
-        <div style={{position:"absolute",bottom:8,left:12,color:"#fff",fontSize:10,opacity:0.7}}>📷 Wikipedia</div>
+        <div style={{position:"absolute",bottom:8,left:12,color:"#fff",fontSize:10,opacity:0.7}}>📷 {plantImg.src}</div>
       </div>
     )}
     <div style={{background:`linear-gradient(135deg,${C.moss},${C.sageDark})`,padding:"16px 20px",color:"#fff"}}>
