@@ -351,6 +351,54 @@ function getDeviceId(){
   return id;
 }
 
+/* ── 설정 Firebase 백업/복원 (삼성 최적화 대응) ── */
+const SETTINGS_FIREBASE_CONFIG={
+  apiKey:"AIzaSyExample", // 아래 initFirebase에서 실제 config 사용
+};
+async function backupSettingsToFirebase(){
+  try{
+    const cfg=getFirebaseConfig();
+    const code=localStorage.getItem("family_code");
+    if(!cfg||!code)return;
+    const ok=initFirebase(cfg);
+    if(!ok)return;
+    const ref=getFamilyRef(code);
+    if(!ref)return;
+    const settings={
+      geminiApiKey:localStorage.getItem("gemini_api_key")||"",
+      familyCode:code,
+      firebaseConfig:JSON.stringify(cfg),
+      deviceId:getDeviceId(),
+      backedUpAt:Date.now()
+    };
+    await ref.child("_settings").set(settings);
+  }catch(e){console.warn("설정 백업 실패:",e);}
+}
+async function restoreSettingsFromFirebase(){
+  try{
+    const cfg=getFirebaseConfig();
+    const code=localStorage.getItem("family_code");
+    if(!cfg||!code)return false;
+    const ok=initFirebase(cfg);
+    if(!ok)return false;
+    const ref=getFamilyRef(code);
+    if(!ref)return false;
+    const snap=await ref.child("_settings").get();
+    if(!snap.exists())return false;
+    const data=snap.val();
+    let restored=false;
+    if(data.geminiApiKey&&!localStorage.getItem("gemini_api_key")){
+      localStorage.setItem("gemini_api_key",data.geminiApiKey);
+      restored=true;
+    }
+    if(data.familyCode&&!localStorage.getItem("family_code")){
+      localStorage.setItem("family_code",data.familyCode);
+      restored=true;
+    }
+    return restored;
+  }catch(e){console.warn("설정 복원 실패:",e);return false;}
+}
+
 
 
 
@@ -507,6 +555,113 @@ const ConfirmDlg=({open,title,message,onConfirm,onCancel})=>{
 
 
 /* ── 가족 동기화 패널 ── */
+/* ── 통합 설정 패널 ── */
+const SettingsPanel=({apiKey,onSaveApiKey,onClose,onRefreshWeather})=>{
+  const[status,setStatus]=useState("");
+  const[busy,setBusy]=useState(false);
+  // ref 기반 - 리렌더링 없이 입력값 유지 (키보드 사라짐 방지)
+  const rGemini=React.useRef(null);
+  const rKma=React.useRef(null);
+  const rOwm=React.useRef(null);
+  const rFc=React.useRef(null);
+  const rFbCfg=React.useRef(null);
+
+  const genCode=()=>{
+    const code=Math.random().toString(36).slice(2,8).toUpperCase();
+    if(rFc.current)rFc.current.value=code;
+  };
+
+  const doSave=async()=>{
+    const geminiVal=(rGemini.current?.value||"").trim();
+    const kmaVal=(rKma.current?.value||"").trim();
+    const owmVal=(rOwm.current?.value||"").trim();
+    const fcVal=(rFc.current?.value||"").trim().toUpperCase();
+    const fbVal=(rFbCfg.current?.value||"").trim();
+    if(geminiVal)onSaveApiKey(geminiVal);
+    if(kmaVal)saveStorage("kma_api_key",kmaVal);
+    if(owmVal)saveStorage("owm_api_key",owmVal);
+    if(fcVal&&fbVal){
+      let parsed;
+      try{parsed=JSON.parse(fbVal);}catch(e){setStatus("❌ Firebase JSON 형식 오류");return;}
+      setBusy(true);setStatus("🔄 Firebase 연결 확인 중...");
+      try{
+        const ok=initFirebase(parsed);
+        if(!ok)throw new Error("초기화 실패");
+        const ref=getFamilyRef(fcVal);
+        if(!ref)throw new Error("DB 참조 실패");
+        await ref.child("_test").set({t:Date.now()});
+        await ref.child("_test").remove();
+        saveStorage("firebase_config_v1",parsed);
+        localStorage.setItem("family_code",fcVal);
+        setTimeout(()=>backupSettingsToFirebase(),500);
+        setStatus("✅ 저장 완료!");
+      }catch(e){setStatus("❌ Firebase 연결 실패: "+e.message);}
+      finally{setBusy(false);}
+    } else {
+      if(fcVal)localStorage.setItem("family_code",fcVal);
+      setStatus("✅ 저장 완료!");
+    }
+    if(kmaVal||owmVal)onRefreshWeather();
+    setTimeout(()=>onClose(),1200);
+  };
+
+  const inpSt={width:"100%",padding:"9px 12px",border:"1px solid #ddd",borderRadius:8,fontSize:13,outline:"none",boxSizing:"border-box"};
+  const lblSt={fontSize:11,color:"#666",marginBottom:4,fontWeight:600,display:"block"};
+  const secSt=(col)=>({background:col+"18",borderRadius:12,padding:"12px 14px",marginBottom:12,border:`1px solid ${col}30`});
+  const secTitleSt=(col)=>({fontSize:13,fontWeight:800,color:col,marginBottom:10});
+
+  return(
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.55)",zIndex:9999,display:"flex",alignItems:"flex-end"}} onClick={e=>{if(e.target===e.currentTarget)onClose();}}>
+      <div style={{background:"#fff",width:"100%",maxHeight:"92vh",borderRadius:"20px 20px 0 0",padding:"20px 16px 32px",overflowY:"auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+          <div style={{fontSize:17,fontWeight:900,color:C.moss}}>⚙️ 설정</div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:22,cursor:"pointer",color:"#999"}}>✕</button>
+        </div>
+
+        {/* Gemini API */}
+        <div style={secSt(C.moss)}>
+          <div style={secTitleSt(C.moss)}>🤖 Gemini AI</div>
+          <label style={lblSt}>API 키 <a href="https://aistudio.google.com/app/apikey" target="_blank" style={{color:C.sky,fontWeight:400}}>→ 무료 발급</a></label>
+          <input ref={rGemini} type="password" defaultValue={apiKey||""} placeholder="AIza..." style={inpSt}/>
+        </div>
+
+        {/* 날씨 API */}
+        <div style={secSt(C.sky)}>
+          <div style={secTitleSt(C.sky)}>🌤 날씨 API</div>
+          <label style={lblSt}>기상청 API 키 <a href="https://www.data.go.kr" target="_blank" style={{color:C.sky,fontWeight:400}}>→ data.go.kr 무료발급</a></label>
+          <input ref={rKma} defaultValue={loadStorage("kma_api_key","")} placeholder="기상청 일반 인증키(Encoding)" style={{...inpSt,marginBottom:8}}/>
+          <label style={lblSt}>OpenWeatherMap API 키 (대안)</label>
+          <input ref={rOwm} defaultValue={loadStorage("owm_api_key","")} placeholder="openweathermap.org API 키" style={inpSt}/>
+        </div>
+
+        {/* 가족 동기화 */}
+        <div style={secSt("#E07B39")}>
+          <div style={secTitleSt("#E07B39")}>🔄 가족 동기화</div>
+          <label style={lblSt}>가족 코드</label>
+          <div style={{display:"flex",gap:8,marginBottom:10}}>
+            <input ref={rFc} defaultValue={localStorage.getItem("family_code")||""} placeholder="예: ABC123" style={{...inpSt,textAlign:"center",letterSpacing:3,fontWeight:700,fontSize:15,flex:1,width:"auto"}}/>
+            <button onClick={genCode} style={{padding:"9px 12px",background:"#E07B39",color:"#fff",border:"none",borderRadius:8,fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>코드 생성</button>
+          </div>
+          <label style={lblSt}>Firebase 설정 JSON</label>
+          <div style={{fontSize:11,color:"#888",marginBottom:6}}>firebase.google.com → 프로젝트 설정 → 웹앱 → 구성 복사</div>
+          <textarea ref={rFbCfg} defaultValue={(()=>{const c=getFirebaseConfig();return c?JSON.stringify(c,null,2):"";})()}
+            placeholder='{ "apiKey": "...", "databaseURL": "https://..." }'
+            style={{width:"100%",height:100,fontSize:11,fontFamily:"monospace",padding:8,borderRadius:8,border:"1px solid #ddd",resize:"none",outline:"none",boxSizing:"border-box"}}/>
+          {(getFirebaseConfig()||localStorage.getItem("family_code"))&&(
+            <button onClick={()=>{localStorage.removeItem("family_code");localStorage.removeItem("firebase_config_v1");if(rFc.current)rFc.current.value="";if(rFbCfg.current)rFbCfg.current.value="";setStatus("동기화 해제됨");}} style={{fontSize:11,color:"#999",background:"none",border:"none",cursor:"pointer",marginTop:4}}>🔌 동기화 끄기</button>
+          )}
+        </div>
+
+        {status&&<div style={{padding:"10px 12px",borderRadius:8,background:status.startsWith("✅")?"#F0FFF4":status.startsWith("❌")?"#FFF0F0":"#F0F4FF",fontSize:12,marginBottom:12,fontWeight:600}}>{status}</div>}
+
+        <button onClick={doSave} disabled={busy} style={{width:"100%",padding:14,borderRadius:12,border:"none",background:`linear-gradient(135deg,${C.moss},${C.sageDark})`,color:"#fff",fontSize:16,fontWeight:800,cursor:"pointer",opacity:busy?0.6:1}}>
+          {busy?"확인 중...":"💾 저장"}
+        </button>
+      </div>
+    </div>
+  );
+};
+
 const FamilySyncPanel=({onClose})=>{
   const[cfg,setCfg]=useState(()=>{const c=getFirebaseConfig();return c?JSON.stringify(c,null,2):"";});
   const[code,setCode]=useState(()=>localStorage.getItem("family_code")||"");
@@ -528,6 +683,8 @@ const FamilySyncPanel=({onClose})=>{
       await ref.child("_test").remove();
       saveStorage("firebase_config_v1",parsed);
       localStorage.setItem("family_code",code.toUpperCase().trim());
+      // 가족코드 저장 시 Firebase에도 백업
+      setTimeout(()=>backupSettingsToFirebase(),1000);
       setStatus("✅ 연결 성공!");
       setTimeout(()=>onClose(true),1000);
     }catch(e){setStatus("❌ 연결 실패: "+e.message);}
@@ -621,7 +778,7 @@ const ApiKeySetup=({onSave})=>{
           style={{width:"100%",padding:13,background:testing?C.inkLight:`linear-gradient(135deg,${C.moss},${C.sageDark})`,color:"#fff",border:"none",borderRadius:12,fontWeight:700,fontSize:15,cursor:testing?"wait":"pointer"}}>
           {testing?"🔍 확인 중...":"🌿 시작하기"}
         </button>
-        <div style={{textAlign:"right",marginTop:10,fontSize:11,color:C.inkLight}}>v56</div>
+        <div style={{textAlign:"right",marginTop:10,fontSize:11,color:C.inkLight}}>v59</div>
       </div>
     </div>
   );
@@ -3025,6 +3182,8 @@ function App(){
   const[familyCode,setFamilyCode]=useState(()=>localStorage.getItem("family_code")||"");
   const[syncStatus,setSyncStatus]=useState("off");
   const[showSyncPanel,setShowSyncPanel]=useState(false);
+  const[restoring,setRestoring]=useState(false);
+  const[showSettings,setShowSettings]=useState(false);
   const isRemoteUpdate=useRef(false);
   const syncTimer=useRef(null);
   const[tab,setTab]=useState("garden");
@@ -3038,7 +3197,12 @@ function App(){
   const[wError,setWError]=useState(false);
   const[confirm,setConfirm]=useState({open:false,title:"",message:"",onConfirm:null});
 
-  const saveKey=key=>{localStorage.setItem("gemini_api_key",key);setApiKey(key);};
+  const saveKey=key=>{
+    localStorage.setItem("gemini_api_key",key);
+    setApiKey(key);
+    // API키 저장 시 Firebase에도 백업
+    setTimeout(()=>backupSettingsToFirebase(),500);
+  };
   const closeConfirm=useCallback(()=>setConfirm(c=>({...c,open:false,onConfirm:null})),[]);
 
   const askDel=(payload,message,title,delFn)=>setConfirm({open:true,title,message,onConfirm:()=>{delFn(payload);setConfirm(c=>({...c,open:false}));}});
@@ -3046,6 +3210,22 @@ function App(){
   const askDelFert=(id,msg,title)=>askDel(id,msg,title,i=>setFertilizers(prev=>prev.filter(f=>f.id!==i)));
   const askDelPest=(id,msg,title)=>askDel(id,msg,title,i=>setPesticides(prev=>prev.filter(p=>p.id!==i)));
   const askDelDiary=(id,msg,title)=>askDel(id,msg,title,i=>setDiary(prev=>prev.filter(d=>d.id!==i)));
+
+  // 앱 시작 시 Firebase에서 설정 자동복원 (삼성 최적화로 localStorage 날아간 경우 대응)
+  useEffect(()=>{
+    if(!apiKey){
+      setRestoring(true);
+      restoreSettingsFromFirebase().then(restored=>{
+        if(restored){
+          const restoredKey=localStorage.getItem("gemini_api_key")||"";
+          const restoredCode=localStorage.getItem("family_code")||"";
+          if(restoredKey)setApiKey(restoredKey);
+          if(restoredCode)setFamilyCode(restoredCode);
+        }
+        setRestoring(false);
+      });
+    }
+  },[]);
 
   useEffect(()=>{fetchWeather();},[]);
   useEffect(()=>{saveStorage("garden_v1",garden);},[garden]);
@@ -3328,7 +3508,13 @@ function App(){
   const updateFert=useCallback((id,updates)=>setFertilizers(prev=>prev.map(f=>f.id===id?{...f,...updates}:f)),[]);
   const updatePest=useCallback((id,updates)=>setPesticides(prev=>prev.map(p=>p.id===id?{...p,...updates}:p)),[]);
 
-  if(!apiKey) return <ApiKeySetup onSave={saveKey}/>;
+  if(restoring) return(
+    <div style={{minHeight:"100vh",background:`linear-gradient(160deg,${C.cream},#EFF5EB)`,display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column",gap:16}}>
+      <div style={{fontSize:48}}>🌿</div>
+      <div style={{fontSize:16,fontWeight:700,color:C.moss}}>정원 도감 불러오는 중...</div>
+      <div style={{fontSize:13,color:C.inkLight}}>설정을 복원하고 있습니다</div>
+    </div>
+  );
 
   const overdueCount=garden.filter(p=>{const s=p.status||"have";return(s==="have"||!s)&&getDaysUntilWatering(p)<=0;}).length;
 
@@ -3342,15 +3528,23 @@ function App(){
     <div style={{minHeight:"100vh",background:`linear-gradient(160deg,${C.cream} 0%,#EFF5EB 100%)`,fontFamily:"'Apple SD Gothic Neo','Noto Sans KR',sans-serif"}}>
       <ConfirmDlg open={confirm.open} title={confirm.title} message={confirm.message} onConfirm={confirm.onConfirm} onCancel={closeConfirm}/>
       {showSyncPanel&&<FamilySyncPanel onClose={saved=>{setShowSyncPanel(false);if(saved)setFamilyCode(localStorage.getItem("family_code")||"");}}/>}
+      {showSettings&&<SettingsPanel
+        apiKey={apiKey}
+        onSaveApiKey={key=>{saveKey(key);}}
+        familyCode={familyCode}
+        onClose={()=>{setShowSettings(false);setFamilyCode(localStorage.getItem("family_code")||"");}}
+        onRefreshWeather={fetchWeather}
+      />}
       <div style={{background:`linear-gradient(135deg,${C.moss} 0%,${C.sageDark} 100%)`,padding:"14px 20px 10px",textAlign:"center",boxShadow:"0 4px 20px rgba(0,0,0,0.15)"}}>
         <div style={{fontSize:22,marginBottom:2}}>🌿</div>
         <div style={{fontSize:19,fontWeight:900,color:"#fff",letterSpacing:-0.5}}>나의 정원 도감</div>
         <div style={{fontSize:10,color:C.sageLight,marginTop:2,opacity:0.9}}>Powered by Gemini · 식물·정원·달력·일지·비료·농약</div>
-        <div style={{position:"absolute",right:8,top:12,display:"flex",gap:4}}>
-          <button onClick={()=>setShowSyncPanel(true)} style={{background:syncStatus==="synced"?"rgba(80,200,100,0.3)":syncStatus==="error"?"rgba(255,80,80,0.3)":"rgba(255,255,255,0.15)",border:"none",color:"#fff",borderRadius:6,padding:"3px 7px",fontSize:10,cursor:"pointer"}}>
-            {syncStatus==="synced"?"🔄✅":syncStatus==="error"?"🔄❌":syncStatus==="syncing"?"🔄..":"🔄"}
-          </button>
-          <button onClick={()=>{if(confirm("API 키를 초기화하고 로그아웃하시겠습니까?")){localStorage.removeItem("gemini_api_key");setApiKey("");}}} style={{background:"rgba(255,255,255,0.2)",border:"none",color:"#fff",borderRadius:6,padding:"3px 8px",fontSize:10,cursor:"pointer"}}>키 변경</button>
+        <div style={{position:"absolute",right:8,top:12,display:"flex",gap:4,alignItems:"center"}}>
+          <span style={{fontSize:9,color:"rgba(255,255,255,0.7)"}}>
+            {syncStatus==="synced"?"🔄✅":syncStatus==="error"?"🔄❌":syncStatus==="syncing"?"🔄..":""}
+          </span>
+          {!apiKey&&<span style={{fontSize:9,background:"rgba(255,165,0,0.7)",color:"#fff",borderRadius:4,padding:"1px 5px",fontWeight:700}}>API키 미설정</span>}
+          <button onClick={()=>setShowSettings(true)} style={{background:"rgba(255,255,255,0.2)",border:"none",color:"#fff",borderRadius:6,padding:"4px 9px",fontSize:11,cursor:"pointer",fontWeight:700}}>⚙️ 설정</button>
         </div>
       </div>
       <div style={{display:"flex",background:"#fff",borderBottom:`1px solid ${C.sageLight}50`,overflowX:"auto"}}>
